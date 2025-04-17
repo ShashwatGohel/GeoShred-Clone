@@ -1,0 +1,359 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row =>
+                    row.some(cell => cell !== '' && cell !== null && cell !== undefined)
+                );
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GeoShred-Inspired Web Instrument</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background-color: #f0f0f0;
+    }
+    canvas {
+      border: 2px solid #333;
+      background-color: #222;
+    }
+    #controls {
+      margin: 20px;
+    }
+    button, select {
+      padding: 10px;
+      margin: 5px;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <select id="scaleSelect">
+      <option value="major">Major</option>
+      <option value="minor">Minor</option>
+      <option value="blues">Blues</option>
+    </select>
+    <select id="octaveSelect">
+      <option value="-1">Octave 2</option>
+      <option value="0" selected>Octave 3</option>
+      <option value="1">Octave 4</option>
+    </select>
+    <select id="instrumentSelect">
+      <option value="guitar">Guitar</option>
+      <option value="piano">Piano</option>
+      <option value="sitar">Sitar</option>
+    </select>
+    <button onclick="toggleDistortion()">Distortion: Off</button>
+    <button onclick="toggleReverb()">Reverb: Off</button>
+  </div>
+  <canvas id="playSurface" width="800" height="200"></canvas>
+
+  <script>
+    const canvas = document.getElementById('playSurface');
+    const ctx = canvas.getContext('2d');
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    let isDistortionOn = false;
+    let isReverbOn = false;
+    let currentInstrument = 'guitar';
+
+    // Define musical scales (semitones for natural notes only: C, D, E, F, G, A, B)
+    const scales = {
+      major: [0, 2, 4, 5, 7, 9, 11], // C, D, E, F, G, A, B
+      minor: [0, 2, 3, 5, 7, 8, 10], // C, D, D#, F, G, G#, A#
+      blues: [0, 3, 5, 6, 7, 10] // C, D#, F, F#, G, A#
+    };
+
+    // Note names (natural notes only)
+    const noteNames = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+
+    let currentScale = scales.major;
+    const baseFreq = 220; // A3
+    const gridRows = 2; // Two strings
+    const gridCols = 7; // One column per natural note
+
+    // Generate impulse response for reverb
+    function createImpulseResponse(duration, decay) {
+      const sampleRate = audioCtx.sampleRate;
+      const length = sampleRate * duration;
+      const impulse = audioCtx.createBuffer(2, length, sampleRate);
+      const left = impulse.getChannelData(0);
+      const right = impulse.getChannelData(1);
+
+      for (let i = 0; i < length; i++) {
+        const n = length - i;
+        left[i] = (Math.random() * 2 - 1) * Math.pow(n / length, decay);
+        right[i] = (Math.random() * 2 - 1) * Math.pow(n / length, decay);
+      }
+      return impulse;
+    }
+
+    const reverbNode = audioCtx.createConvolver();
+    reverbNode.buffer = createImpulseResponse(2, 2);
+
+    // Get note name for a given row and column
+    function getNoteName(row, col) {
+      const noteIndex = (col + (row * 5)) % noteNames.length; // 5 semitones between strings
+      return noteNames[noteIndex];
+    }
+
+    // Draw the playing surface with note names
+    function drawGrid() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const cellWidth = canvas.width / gridCols;
+      const cellHeight = canvas.height / gridRows;
+
+      ctx.strokeStyle = '#888';
+      ctx.fillStyle = '#444';
+      ctx.font = '14px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff';
+
+      for (let row = 0; row < gridRows; row++) {
+        for (let col = 0; col < gridCols; col++) {
+          ctx.strokeRect(col * cellWidth, row * cellHeight, cellWidth, cellHeight);
+          if (row === currentRow && col === currentCol) {
+            ctx.fillStyle = '#444';
+            ctx.fillRect(col * cellWidth, row * cellHeight, cellWidth, cellHeight);
+            ctx.fillStyle = '#fff';
+          }
+          const noteName = getNoteName(row, col);
+          ctx.fillText(noteName, col * cellWidth + cellWidth / 2, row * cellHeight + cellHeight / 2);
+        }
+      }
+    }
+
+    // Calculate frequency for a given row and column
+    function getFrequency(row, col) {
+      const octaveShift = parseInt(document.getElementById('octaveSelect').value);
+      const noteIndex = (col + (row * 5)) % noteNames.length;
+      const semitone = [0, 2, 3, 5, 7, 8, 10][noteIndex]; // Map to natural note semitones
+      const octave = Math.floor((col + (row * 5)) / noteNames.length);
+      return (baseFreq * Math.pow(2, octaveShift)) * Math.pow(2, (semitone + (12 * octave)) / 12);
+    }
+
+    // Play a note with instrument-specific sound
+    function playNote(freq) {
+      const now = audioCtx.currentTime;
+      let osc1, osc2, gainNode;
+
+      if (currentInstrument === 'guitar') {
+        osc1 = audioCtx.createOscillator();
+        osc2 = audioCtx.createOscillator();
+        osc1.type = 'sawtooth';
+        osc2.type = 'sine';
+        osc1.frequency.setValueAtTime(freq, now);
+        osc2.frequency.setValueAtTime(freq + 0.05, now);
+
+        gainNode = audioCtx.createGain();
+        gainNode.gain.setValueAtTime(0, now);
+        gainNode.gain.linearRampToValueAtTime(0.2, now + 0.05);
+        gainNode.gain.linearRampToValueAtTime(0.14, now + 0.15);
+        gainNode.gain.linearRampToValueAtTime(0.14, now + 0.45);
+        gainNode.gain.linearRampToValueAtTime(0, now + 0.75);
+
+        osc1.connect(gainNode);
+        osc2.connect(gainNode);
+      } else if (currentInstrument === 'piano') {
+        osc1 = audioCtx.createOscillator();
+        osc1.type = 'sine';
+        osc1.frequency.setValueAtTime(freq, now);
+
+        gainNode = audioCtx.createGain();
+        gainNode.gain.setValueAtTime(0, now);
+        gainNode.gain.linearRampToValueAtTime(0.3, now + 0.01);
+        gainNode.gain.linearRampToValueAtTime(0.1, now + 0.31);
+        gainNode.gain.linearRampToValueAtTime(0.1, now + 0.81);
+        gainNode.gain.linearRampToValueAtTime(0, now + 1.11);
+
+        osc1.connect(gainNode);
+      } else if (currentInstrument === 'sitar') {
+        osc1 = audioCtx.createOscillator();
+        osc1.type = 'sawtooth';
+        osc1.frequency.setValueAtTime(freq, now);
+
+        const lfo = audioCtx.createOscillator();
+        lfo.type = 'sine';
+        lfo.frequency.setValueAtTime(5, now);
+        const lfoGain = audioCtx.createGain();
+        lfoGain.gain.setValueAtTime(0.5, now);
+        lfo.connect(lfoGain);
+        lfoGain.connect(osc1.frequency);
+        lfo.start();
+        lfo.stop(now + 1.0);
+
+        gainNode = audioCtx.createGain();
+        gainNode.gain.setValueAtTime(0, now);
+        gainNode.gain.linearRampToValueAtTime(0.2, now + 0.05);
+        gainNode.gain.linearRampToValueAtTime(0.1, now + 0.25);
+        gainNode.gain.linearRampToValueAtTime(0.1, now + 0.75);
+        gainNode.gain.linearRampToValueAtTime(0, now + 1.25);
+
+        osc1.connect(gainNode);
+      }
+
+      let lastNode = gainNode;
+      if (currentInstrument === 'guitar' && isDistortionOn) {
+        const distortion = audioCtx.createWaveShaper();
+        distortion.curve = makeDistortionCurve(50);
+        distortion.oversample = '4x';
+        lastNode.connect(distortion);
+        lastNode = distortion;
+      }
+      if (currentInstrument !== 'piano' && isReverbOn) {
+        lastNode.connect(reverbNode);
+        reverbNode.connect(audioCtx.destination);
+      } else {
+        lastNode.connect(audioCtx.destination);
+      }
+
+      osc1.start();
+      if (osc2) osc2.start();
+      osc1.stop(now + (currentInstrument === 'piano' ? 1.11 : currentInstrument === 'sitar' ? 1.25 : 0.75));
+      if (osc2) osc2.stop(now + 0.75);
+    }
+
+    // Distortion curve
+    function makeDistortionCurve(amount) {
+      const samples = 44100;
+      const curve = new Float32Array(samples);
+      const deg = Math.PI / 180;
+      for (let i = 0; i < samples; i++) {
+        const x = (i * 2) / samples - 1;
+        curve[i] = ((3 + amount) * x * 20 * deg) / (Math.PI + amount * Math.abs(x));
+      }
+      return curve;
+    }
+
+    // Update scale
+    document.getElementById('scaleSelect').addEventListener('change', (e) => {
+      currentScale = scales[e.target.value];
+      drawGrid();
+    });
+
+    // Update octave
+    document.getElementById('octaveSelect').addEventListener('change', () => {
+      drawGrid();
+    });
+
+    // Update instrument
+    document.getElementById('instrumentSelect').addEventListener('change', (e) => {
+      currentInstrument = e.target.value;
+      isDistortionOn = false;
+      document.querySelectorAll('button')[0].textContent = `Distortion: Off`;
+      drawGrid();
+    });
+
+    // Toggle distortion
+    function toggleDistortion() {
+      if (currentInstrument === 'guitar') {
+        isDistortionOn = !isDistortionOn;
+        document.querySelectorAll('button')[0].textContent = `Distortion: ${isDistortionOn ? 'On' : 'Off'}`;
+      }
+    }
+
+    // Toggle reverb
+    function toggleReverb() {
+      if (currentInstrument !== 'piano') {
+        isReverbOn = !isReverbOn;
+        document.querySelectorAll('button')[1].textContent = `Reverb: ${isReverbOn ? 'On' : 'Off'}`;
+      }
+    }
+
+    // Handle mouse/touch input
+    let currentRow = -1;
+    let currentCol = -1;
+    let isPlaying = false;
+
+    function handleInput(x, y) {
+      const cellWidth = canvas.width / gridCols;
+      const cellHeight = canvas.height / gridRows;
+      const col = Math.floor(x / cellWidth);
+      const row = Math.floor(y / cellHeight);
+
+      if (row !== currentRow || col !== currentCol) {
+        currentRow = row;
+        currentCol = col;
+        if (row >= 0 && row < gridRows && col >= 0 && col < gridCols) {
+          const freq = getFrequency(row, col);
+          playNote(freq);
+          drawGrid();
+        }
+      }
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+      isPlaying = true;
+      const rect = canvas.getBoundingClientRect();
+      handleInput(e.clientX - rect.left, e.clientY - rect.top);
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (isPlaying) {
+        const rect = canvas.getBoundingClientRect();
+        handleInput(e.clientX - rect.left, e.clientY - rect.top);
+      }
+    });
+
+    canvas.addEventListener('mouseup', () => {
+      isPlaying = false;
+      currentRow = -1;
+      currentCol = -1;
+      drawGrid();
+    });
+
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const touch = e.touches[0];
+      handleInput(touch.clientX - rect.left, touch.clientY - rect.top);
+    });
+
+    canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const touch = e.touches[0];
+      handleInput(touch.clientX - rect.left, touch.clientY - rect.top);
+    });
+
+    canvas.addEventListener('touchend', () => {
+      currentRow = -1;
+      currentCol = -1;
+      drawGrid();
+    });
+
+    // Initialize
+    drawGrid();
+  </script>
+</body>
+</html>
